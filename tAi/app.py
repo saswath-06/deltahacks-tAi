@@ -1,222 +1,224 @@
+from flask import Flask, request, jsonify, session
+from flask_cors import CORS
+from flask.cli import with_appcontext
+from datetime import datetime, timedelta
 import os
 from dotenv import load_dotenv
-from flask import Flask, request, jsonify
-from flask_cors import CORS
-from pymongo import MongoClient
-from bson import ObjectId
-from datetime import datetime, timedelta
-import jwt
-from functools import wraps
-import bcrypt
+import cohere
+import click
+from werkzeug.security import generate_password_hash, check_password_hash
+import json
+from db import db
 
-# Load environment variables
+from models import (
+    init_db,
+    User, UserProgress, StudySession, 
+    ConversationHistory
+)
+
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-# MongoDB connection (using Compass connection string)
-MONGODB_URI = os.getenv('MONGODB_URI')
-if not MONGODB_URI:
-    raise ValueError("MONGODB_URI not found in .env file")
+# Configuration
+app.config['SECRET_KEY'] = os.getenv("SECRET_KEY", "your-secret-key")
+app.config['SQLALCHEMY_DATABASE_URI'] = os.getenv("DATABASE_URL", "sqlite:///tAi.db")
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
-try:
-    # Create a MongoDB client
-    client = MongoClient(MONGODB_URI)
-    # Access your database
-    db = client.get_database('study_assistant')  # Replace 'study_assistant' with your database name
-    print("MongoDB connection successful!")
-except Exception as e:
-    print(f"MongoDB connection failed: {str(e)}")
-    raise
+# Initialize database
+init_db(app)
 
-# JWT configuration
-JWT_SECRET = os.getenv('JWT_SECRET', 'your_jwt_secret_key')
+# Initialize Cohere client
+client = cohere.Client(os.getenv("COHERE_API_KEY"))
 
-# JWT Authentication decorator
-def token_required(f):
-    @wraps(f)
-    def decorated(*args, **kwargs):
-        token = request.headers.get('Authorization')
-        if not token:
-            return jsonify({'message': 'Token is missing'}), 401
-        try:
-            token_parts = token.split()
-            if len(token_parts) != 2 or token_parts[0].lower() != 'bearer':
-                raise ValueError('Invalid token format')
-            
-            data = jwt.decode(token_parts[1], JWT_SECRET, algorithms=["HS256"])
-            current_user = db.users.find_one({'_id': ObjectId(data['user_id'])})
-            if not current_user:
-                return jsonify({'message': 'User not found'}), 401
-                
-        except jwt.ExpiredSignatureError:
-            return jsonify({'message': 'Token has expired'}), 401
-        except (jwt.InvalidTokenError, ValueError) as e:
-            return jsonify({'message': f'Invalid token: {str(e)}'}), 401
-        except Exception as e:
-            return jsonify({'message': 'Server error processing token'}), 500
-            
-        return f(current_user, *args, **kwargs)
-    return decorated
+# CLI Commands
+@click.command('init-db')
+@with_appcontext
+def init_db_command():
+    """Clear existing data and create new tables."""
+    init_db(app)
+    click.echo('Initialized the database.')
 
-@app.route('/api/register', methods=['POST'])
-def register():
-    try:
-        data = request.json
-        
-        # Validate required fields
-        required_fields = ['email', 'password']
-        if not all(field in data for field in required_fields):
-            return jsonify({'message': 'Missing required fields'}), 400
-            
-        # Check email format
-        if '@' not in data['email']:
-            return jsonify({'message': 'Invalid email format'}), 400
-            
-        # Check if email already exists
-        if db.users.find_one({'email': data['email'].lower()}):
-            return jsonify({'message': 'Email already exists'}), 400
-        
-        # Hash password
-        hashed_password = bcrypt.hashpw(data['password'].encode('utf-8'), bcrypt.gensalt())
-        
-        user = {
-            'email': data['email'].lower(),
-            'password': hashed_password,
-            'study_topics': [],
-            'knowledge_level': {},
-            'streak': 0,
-            'last_study_date': datetime.utcnow(),
-            'created_at': datetime.utcnow()
-        }
-        
-        user_id = db.users.insert_one(user).inserted_id
-        token = jwt.encode(
-            {
-                'user_id': str(user_id),
-                'exp': datetime.utcnow() + timedelta(days=1)
-            },
-            JWT_SECRET
-        )
-        
-        return jsonify({'token': token})
-        
-    except Exception as e:
-        print(f"Registration error: {str(e)}")
-        return jsonify({'message': 'Registration failed'}), 500
+# Register the command with Flask
+app.cli.add_command(init_db_command)
 
-@app.route('/api/login', methods=['POST'])
+# Routes for authentication
+@app.route("/api/auth/login", methods=["POST"])
 def login():
-    try:
-        data = request.json
-        
-        if not all(k in data for k in ['email', 'password']):
-            return jsonify({'message': 'Missing email or password'}), 400
-            
-        user = db.users.find_one({'email': data['email'].lower()})
-        if not user:
-            return jsonify({'message': 'Invalid credentials'}), 401
-            
-        if not bcrypt.checkpw(data['password'].encode('utf-8'), user['password']):
-            return jsonify({'message': 'Invalid credentials'}), 401
-        
-        token = jwt.encode(
-            {
-                'user_id': str(user['_id']),
-                'exp': datetime.utcnow() + timedelta(days=1)
-            },
-            JWT_SECRET
-        )
-        return jsonify({'token': token})
-        
-    except Exception as e:
-        print(f"Login error: {str(e)}")
-        return jsonify({'message': 'Login failed'}), 500
-
-@app.route('/api/topics', methods=['GET'])
-@token_required
-def get_topics(current_user):
-    try:
-        return jsonify({'topics': current_user['study_topics']})
-    except Exception as e:
-        print(f"Error fetching topics: {str(e)}")
-        return jsonify({'message': 'Failed to fetch topics'}), 500
-
-@app.route('/api/topics', methods=['POST'])
-@token_required
-def add_topic(current_user):
-    try:
-        data = request.json
-        if 'topic' not in data:
-            return jsonify({'message': 'Topic is required'}), 400
-            
-        db.users.update_one(
-            {'_id': current_user['_id']},
-            {'$push': {'study_topics': data['topic']}}
-        )
-        return jsonify({'message': 'Topic added successfully'})
-    except Exception as e:
-        print(f"Error adding topic: {str(e)}")
-        return jsonify({'message': 'Failed to add topic'}), 500
-
-@app.route('/api/progress', methods=['POST'])
-@token_required
-def update_progress(current_user):
-    try:
-        data = request.json
-        if not all(k in data for k in ['topic', 'progress']):
-            return jsonify({'message': 'Topic and progress are required'}), 400
-            
-        topic = data['topic']
-        progress = data['progress']
-        
-        if not isinstance(progress, (int, float)) or not 0 <= progress <= 100:
-            return jsonify({'message': 'Progress must be a number between 0 and 100'}), 400
-        
-        current_time = datetime.utcnow()
-        
-        db.users.update_one(
-            {'_id': current_user['_id']},
-            {
-                '$set': {
-                    f'knowledge_level.{topic}': progress,
-                    'last_study_date': current_time
-                }
-            }
-        )
-        
-        today = current_time.date()
-        last_study = current_user.get('last_study_date', current_time).date()
-        
-        if today - last_study == timedelta(days=1):
-            db.users.update_one(
-                {'_id': current_user['_id']},
-                {'$inc': {'streak': 1}}
-            )
-        elif today - last_study > timedelta(days=1):
-            db.users.update_one(
-                {'_id': current_user['_id']},
-                {'$set': {'streak': 1}}
-            )
-        
-        return jsonify({'message': 'Progress updated successfully'})
-        
-    except Exception as e:
-        print(f"Error updating progress: {str(e)}")
-        return jsonify({'message': 'Failed to update progress'}), 500
-
-@app.route('/api/stats', methods=['GET'])
-@token_required
-def get_stats(current_user):
-    try:
+    data = request.json
+    user = User.query.filter_by(email=data["email"]).first()
+    
+    if user and check_password_hash(user.password, data["password"]):
+        session['user_id'] = user.id
         return jsonify({
-            'streak': current_user['streak'],
-            'knowledge_level': current_user['knowledge_level']
+            "id": user.id,
+            "email": user.email,
+            "name": user.name
         })
-    except Exception as e:
-        print(f"Error fetching stats: {str(e)}")
-        return jsonify({'message': 'Failed to fetch stats'}), 500
+    return jsonify({"error": "Invalid credentials"}), 401
 
-if __name__ == '__main__':
+@app.route("/api/auth/register", methods=["POST"])
+def register():
+    data = request.json
+    
+    # Check if user exists
+    if User.query.filter_by(email=data["email"]).first():
+        return jsonify({"error": "Email already registered"}), 400
+    
+    # Create new user
+    user = User(
+        email=data["email"],
+        password=generate_password_hash(data["password"]),
+        name=data["name"]
+    )
+    db.session.add(user)
+    
+    # Create initial progress record
+    progress = UserProgress(user=user)
+    db.session.add(progress)
+    
+    try:
+        db.session.commit()
+        session['user_id'] = user.id
+        return jsonify({"id": user.id, "email": user.email})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/auth/logout", methods=["POST"])
+def logout():
+    session.pop('user_id', None)
+    return jsonify({"message": "Logged out successfully"})
+
+# Routes for AI Tutor
+@app.route("/api/tutor/chat", methods=["POST"])
+def chat():
+    if 'user_id' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+        
+    data = request.json
+    try:
+        # Get user's learning progress
+        progress = UserProgress.query.filter_by(user_id=session['user_id']).first()
+        
+        # Create context-aware prompt
+        context = f"""You are an AI tutor. The student's current level is {progress.current_level}.
+        Topics they've mastered: {', '.join(progress.get_mastered_topics())}.
+        Current learning goals: {', '.join(progress.get_learning_goals())}.
+        
+        Provide guidance and help them learn, but don't give direct answers.
+        Use the Socratic method to guide them to understanding.
+        """
+        
+        # Generate response using Cohere
+        response = client.chat(
+            message=data["message"],
+            preamble=context,
+            model='command',
+            temperature=0.7,
+            max_tokens=1024
+        )
+        
+        # Store conversation
+        conversation = ConversationHistory(
+            user_id=session['user_id'],
+            message=data["message"],
+            response=response.text,
+            timestamp=datetime.utcnow()
+        )
+        db.session.add(conversation)
+        db.session.commit()
+        
+        return jsonify({
+            "id": conversation.id,
+            "role": "assistant",
+            "content": response.text,
+            "timestamp": conversation.timestamp.isoformat()
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error in chat: {str(e)}")
+        return jsonify({"error": "Failed to generate response"}), 500
+
+@app.route("/api/tutor/progress", methods=["GET"])
+def get_progress():
+    if 'user_id' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+        
+    progress = UserProgress.query.filter_by(user_id=session['user_id']).first()
+    if progress:
+        return jsonify({
+            "current_level": progress.current_level,
+            "mastered_topics": progress.get_mastered_topics(),
+            "learning_goals": progress.get_learning_goals()
+        })
+    return jsonify({"error": "Progress not found"}), 404
+
+@app.route("/api/tutor/start-pomodoro", methods=["POST"])
+def start_pomodoro():
+    if 'user_id' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+        
+    data = request.json
+    duration = data.get("duration", 25)  # Default 25 minutes
+    
+    study_session = StudySession(
+        user_id=session['user_id'],
+        start_time=datetime.utcnow(),
+        planned_duration=duration,
+        status="active"
+    )
+    db.session.add(study_session)
+    
+    try:
+        db.session.commit()
+        return jsonify({"session_id": study_session.id})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route("/api/tutor/end-pomodoro", methods=["POST"])
+def end_pomodoro():
+    if 'user_id' not in session:
+        return jsonify({"error": "Not authenticated"}), 401
+        
+    data = request.json
+    session_id = data.get("session_id")
+    
+    try:
+        # Update session status
+        study_session = StudySession.query.get(session_id)
+        if not study_session or study_session.user_id != session['user_id']:
+            return jsonify({"error": "Session not found"}), 404
+            
+        study_session.end_time = datetime.utcnow()
+        study_session.status = "completed"
+        study_session.actual_duration = int((study_session.end_time - study_session.start_time).total_seconds() / 60)
+        
+        # Update user streak
+        user = User.query.get(session['user_id'])
+        if user.last_study_session:
+            time_diff = datetime.utcnow() - user.last_study_session
+            if time_diff <= timedelta(days=1):
+                user.study_streak += 1
+                if user.study_streak > user.longest_streak:
+                    user.longest_streak = user.study_streak
+            else:
+                user.study_streak = 1
+        else:
+            user.study_streak = 1
+            
+        user.last_study_session = datetime.utcnow()
+        user.total_study_time = (user.total_study_time or 0) + study_session.actual_duration
+        
+        db.session.commit()
+        return jsonify({"success": True})
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == "__main__":
     app.run(debug=True)

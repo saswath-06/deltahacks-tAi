@@ -1,103 +1,108 @@
-// src/api/index.ts
 import axios from 'axios';
 
-const API_URL = 'http://localhost:5000/api';
+// Types
+export interface User {
+    id: string;
+    email: string;
+    name: string;
+}
 
-// Create axios instance with default config
+export interface ChatMessage {
+    id: string;
+    role: 'user' | 'assistant';
+    content: string;
+    timestamp: string;
+}
+
+export interface StudySession {
+    id: number;
+    startTime: string;
+    endTime?: string;
+    duration: number;
+    status: 'active' | 'completed' | 'cancelled';
+}
+
+export interface StudyMaterial {
+    id: number;
+    driveFileId: string;
+    filename: string;
+    contentSummary?: string;
+    topics: string[];
+    lastAccessed: string;
+}
+
+// API Base Configuration
 const api = axios.create({
-  baseURL: API_URL,
-  headers: {
-    'Content-Type': 'application/json',
-  },
+    baseURL: '/api',
+    headers: {
+        'Content-Type': 'application/json',
+    },
 });
 
-// Add token to requests if it exists
-api.interceptors.request.use((config) => {
-  const token = localStorage.getItem('token');
-  if (token) {
-    config.headers.Authorization = `Bearer ${token}`;
-  }
-  return config;
-});
-
-// Auth types
-interface LoginData {
-  email: string;
-  password: string;
-}
-
-interface RegisterData extends LoginData {
-  name: string;
-}
-
-// API response types
-interface AuthResponse {
-  token: string;
-}
-
-interface Topic {
-  id: string;
-  name: string;
-  description: string;
-}
-
-interface UserStats {
-  streak: number;
-  knowledge_level: Record<string, number>;
-}
-
-// Auth API
+// Auth APIs
 export const auth = {
-  login: async (data: LoginData): Promise<AuthResponse> => {
-    const response = await api.post('/login', data);
-    return response.data;
-  },
-  
-  register: async (data: RegisterData): Promise<AuthResponse> => {
-    const response = await api.post('/register', data);
-    return response.data;
-  },
-  
-  logout: () => {
-    localStorage.removeItem('token');
-  },
+    login: async (email: string, password: string) => {
+        const response = await api.post('/auth/login', { email, password });
+        return response.data;
+    },
+    register: async (email: string, password: string, name: string) => {
+        const response = await api.post('/auth/register', { email, password, name });
+        return response.data;
+    },
+    logout: async () => {
+        const response = await api.post('/auth/logout');
+        return response.data;
+    },
 };
 
-// Topics API
-export const topics = {
-  getAll: async (): Promise<Topic[]> => {
-    const response = await api.get('/topics');
-    return response.data.topics;
-  },
-  
-  add: async (topic: Omit<Topic, 'id'>): Promise<Topic> => {
-    const response = await api.post('/topics', topic);
-    return response.data;
-  },
+// AI Tutor APIs
+export const aiTutor = {
+    sendMessage: async (message: string): Promise<ChatMessage> => {
+        const response = await api.post('/tutor/chat', { message });
+        return response.data;
+    },
+
+    getUserProgress: async () => {
+        const response = await api.get('/tutor/progress');
+        return response.data;
+    },
+
+    startSession: async (duration?: number) => {
+        const response = await api.post('/tutor/start-pomodoro', { duration });
+        return response.data;
+    },
+
+    endSession: async (sessionId: number) => {
+        const response = await api.post('/tutor/end-pomodoro', { session_id: sessionId });
+        return response.data;
+    },
 };
 
-// Progress API
-export const progress = {
-  update: async (topicId: string, progress: number): Promise<void> => {
-    await api.post('/progress', { topic: topicId, progress });
-  },
-  
-  getStats: async (): Promise<UserStats> => {
-    const response = await api.get('/stats');
-    return response.data;
-  },
+// Google Drive APIs
+export const drive = {
+    listFiles: async () => {
+        const response = await api.get('/drive/files');
+        return response.data;
+    },
+
+    processMaterial: async (fileId: string) => {
+        const response = await api.post('/drive/process', { file_id: fileId });
+        return response.data;
+    },
+
+    getAuthUrl: async () => {
+        const response = await api.get('/drive/auth-url');
+        return response.data;
+    },
+
+    handleAuthCallback: async (code: string) => {
+        const response = await api.post('/drive/oauth-callback', { code });
+        return response.data;
+    },
 };
 
-// Error handling
-api.interceptors.response.use(
-  (response) => response,
-  (error) => {
-    if (error.response?.status === 401) {
-      auth.logout();
-      window.location.href = '/login';
-    }
-    return Promise.reject(error);
-  }
-);
-
-export default api;
+export default {
+    auth,
+    aiTutor,
+    drive,
+};

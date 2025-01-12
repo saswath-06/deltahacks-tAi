@@ -1,44 +1,82 @@
-import { useState } from 'react';
-import StudyDashboard from './components/StudyDashboard';
+import { useState, useEffect } from 'react';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import LoginScreen from './components/LoginScreen';
-
-type User = {
-  email: string;
-} | null;
+import StudyDashboard from './components/StudyDashboard';
+import AiChat from './components/AiChat';
+import Navbar from './components/Navbar';
+import StudySession from './components/StudySession';
+import { User } from './types';
 
 function App() {
-  const [user, setUser] = useState<User>(null);
-  const [isTransitioning, setIsTransitioning] = useState(false);
+  const [user, setUser] = useState<User | null>(null);
 
-  const handleLogin = (email: string) => {
-    setIsTransitioning(true);
-    // Simulate auth delay
-    setTimeout(() => {
-      setUser({ email });
-      setIsTransitioning(false);
-    }, 500);
-  };
+  useEffect(() => {
+    // Check for user in localStorage on mount
+    const storedUser = localStorage.getItem('user');
+    if (storedUser) {
+      setUser(JSON.parse(storedUser));
+    }
+  }, []);
 
-  const handleSignOut = () => {
-    setIsTransitioning(true);
-    setTimeout(() => {
-      setUser(null);
-      setIsTransitioning(false);
-    }, 500);
+  const handleLogout = () => {
+    localStorage.removeItem('user');
+    setUser(null);
   };
 
   return (
-    <div className="h-screen w-screen overflow-hidden relative">
-      <div className={`absolute inset-0 bg-blue-600 transform transition-transform duration-500 ease-in-out ${isTransitioning ? 'translate-x-0' : '-translate-x-full'}`} />
-      
-      <div className={`h-full w-full transition-opacity duration-300 ${isTransitioning ? 'opacity-0' : 'opacity-100'}`}>
-        {user ? (
-          <StudyDashboard user={user} onSignOut={handleSignOut} />
-        ) : (
-          <LoginScreen onLogin={handleLogin} />
-        )}
+    <Router>
+      <div className="min-h-screen bg-gray-50">
+        {user && <Navbar user={user} onLogout={handleLogout} />}
+        <main className="container mx-auto px-4 py-8">
+          <Routes>
+            <Route 
+              path="/login" 
+              element={
+                !user ? (
+                  <LoginScreen onLoginSuccess={setUser} />
+                ) : (
+                  <Navigate to="/dashboard" replace />
+                )
+              } 
+            />
+            <Route 
+              path="/dashboard" 
+              element={
+                user ? (
+                  <StudyDashboard user={user} />
+                ) : (
+                  <Navigate to="/login" replace />
+                )
+              } 
+            />
+            <Route 
+              path="/chat" 
+              element={
+                user ? (
+                  <AiChat user={user} />
+                ) : (
+                  <Navigate to="/login" replace />
+                )
+              } 
+            />
+            <Route 
+              path="/study" 
+              element={
+                user ? (
+                  <StudySession user={user} />
+                ) : (
+                  <Navigate to="/login" replace />
+                )
+              } 
+            />
+            <Route
+              path="/"
+              element={<Navigate to={user ? "/dashboard" : "/login"} replace />}
+            />
+          </Routes>
+        </main>
       </div>
-    </div>
+    </Router>
   );
 }
 
